@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Review Agent — multi-agent AI review on free LLM providers</title>
+<meta name="description" content="An open, multi-agent AI code reviewer. Runs on free LLM providers (Groq, Gemini, OpenRouter) or fully offline.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============================ TOP BAR ============================ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 5 4 12l5 7"/><path d="m15 5 5 7-5 7"/><path d="M13 4l-2 16"/>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <strong>Code Review Agent</strong>
+        <span>multi-agent review · free providers</span>
+      </div>
+    </div>
+
+    <div class="topbar-controls">
+      <div class="field compact">
+        <label for="provider-select">Provider</label>
+        <select id="provider-select"></select>
+      </div>
+      <div class="field compact">
+        <label for="model-select">Model</label>
+        <select id="model-select"></select>
+      </div>
+      <div class="field compact">
+        <label for="effort-select">Effort</label>
+        <select id="effort-select">
+          <option value="quick">Quick · 2 agents</option>
+          <option value="standard" selected>Standard · 5 agents</option>
+          <option value="deep">Deep · 2 rounds</option>
+        </select>
+      </div>
+      <button class="btn ghost" id="prompt-btn" title="Show the exact system prompt">System prompt</button>
+      <button class="btn ghost" id="settings-btn" title="Providers and API keys">
+        <span class="gear" aria-hidden="true">⚙</span> Settings
+      </button>
+    </div>
+  </header>
+
+  <div class="status-strip" id="status-strip">
+    <span class="dot" id="provider-dot"></span>
+    <span id="status-text">Loading…</span>
+    <span class="spacer"></span>
+    <span id="usage-text" class="muted"></span>
+  </div>
+
+  <!-- ============================ WORKSPACE ============================ -->
+  <main class="workspace">
+
+    <!-- ---------------------------- INPUT ---------------------------- -->
+    <section class="pane pane-input" aria-label="Code input">
+      <div class="pane-head">
+        <h2>Submit code</h2>
+        <div class="tabs small" role="tablist">
+          <button class="tab active" data-input-tab="code" role="tab">Code</button>
+          <button class="tab" data-input-tab="diff" role="tab">Diff / patch</button>
+          <button class="tab" data-input-tab="pr" role="tab">GitHub PR</button>
+        </div>
+      </div>
+
+      <div class="pane-body">
+        <!-- code tab -->
+        <div class="input-tab-panel" data-panel="code">
+          <div class="field row">
+            <label for="file-path">File path</label>
+            <input id="file-path" type="text" value="app.py" placeholder="src/service/user.py" spellcheck="false">
+            <select id="language-select" title="Language (auto-detected if left alone)">
+              <option value="">auto-detect</option>
+            </select>
+          </div>
+          <textarea id="code-input" class="editor" spellcheck="false"
+            placeholder="Paste the code you want reviewed…&#10;&#10;Tip: try one of the examples below, or drop a file here."></textarea>
+          <div class="editor-foot">
+            <span class="muted" id="code-stats">0 lines · 0 chars</span>
+            <span class="spacer"></span>
+            <label class="drop-hint muted">or drop a file<input type="file" id="file-drop" hidden></label>
+          </div>
+        </div>
+
+        <!-- diff tab -->
+        <div class="input-tab-panel" data-panel="diff" hidden>
+          <div class="field row">
+            <label for="diff-base">Base</label>
+            <input id="diff-base" type="text" placeholder="optional: git diff main...HEAD" spellcheck="false" disabled>
+            <button class="btn ghost small" id="use-git-btn" type="button" title="Generate a diff from this repository">From local git</button>
+          </div>
+          <textarea id="diff-input" class="editor mono" spellcheck="false"
+            placeholder="Paste a unified diff (git diff output)…&#10;&#10;diff --git a/app.py b/app.py&#10;--- a/app.py&#10;+++ b/app.py&#10;@@ -1,4 +1,7 @@&#10;+import os"></textarea>
+          <div class="editor-foot">
+            <span class="muted" id="diff-stats">no diff</span>
+            <label class="checkbox"><input type="checkbox" id="focus-changed" checked> Only comment on changed lines</label>
+          </div>
+        </div>
+
+        <!-- PR tab -->
+        <div class="input-tab-panel" data-panel="pr" hidden>
+          <div class="field">
+            <label for="pr-input">Pull request</label>
+            <div class="row">
+              <input id="pr-input" type="text" placeholder="owner/repo#123  or  https://github.com/owner/repo/pull/123" spellcheck="false">
+              <button class="btn ghost" id="pr-fetch-btn" type="button">Fetch</button>
+            </div>
+          </div>
+          <div id="pr-preview" class="pr-preview muted">
+            Public repos need no token. Private repos need a <code>GITHUB_TOKEN</code> on the server.
+          </div>
+          <div class="callout">
+            <strong>Note:</strong> the PR's added lines are reviewed; only changed lines get comments.
+          </div>
+        </div>
+
+        <!-- options -->
+        <details class="options">
+          <summary>Review options</summary>
+          <div class="option-grid">
+            <label class="checkbox" data-cat="quality"><input type="checkbox" value="quality" checked> Code quality</label>
+            <label class="checkbox" data-cat="bug"><input type="checkbox" value="bug" checked> Bug detection</label>
+            <label class="checkbox" data-cat="security"><input type="checkbox" value="security" checked> Security</label>
+            <label class="checkbox" data-cat="performance"><input type="checkbox" value="performance" checked> Performance</label>
+            <label class="checkbox" data-cat="best_practices"><input type="checkbox" value="best_practices" checked> Best practices</label>
+            <label class="checkbox"><input type="checkbox" id="include-summary" checked> Walkthrough &amp; diagram</label>
+          </div>
+          <div class="field">
+            <label for="instructions">Extra instructions <span class="muted">(style guide, context, what to ignore)</span></label>
+            <textarea id="instructions" class="editor short" spellcheck="false"
+              placeholder="e.g. This is a Django 5 project. Ignore migration files. We require type hints on all public functions."></textarea>
+          </div>
+          <div class="field row thirds">
+            <div>
+              <label for="min-severity">Min severity</label>
+              <select id="min-severity">
+                <option value="info" selected>Everything</option>
+                <option value="low">Low and up</option>
+                <option value="medium">Medium and up</option>
+                <option value="high">High and up</option>
+                <option value="critical">Critical only</option>
+              </select>
+            </div>
+            <div>
+              <label for="max-findings">Max findings</label>
+              <input id="max-findings" type="number" min="1" max="200" value="40">
+            </div>
+            <div>
+              <label for="temperature">Temperature</label>
+              <input id="temperature" type="number" min="0" max="1.5" step="0.05" value="0.2">
+            </div>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button class="btn primary" id="run-btn">
+            <span class="btn-label">Run review</span>
+          </button>
+          <button class="btn" id="scan-btn" title="Static analysis only — no LLM, instant, free">Static scan only</button>
+          <button class="btn ghost" id="clear-btn">Clear</button>
+        </div>
+
+        <div class="examples">
+          <span class="muted">Examples:</span>
+          <span id="example-list"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------- OUTPUT ---------------------------- -->
+    <section class="pane pane-output" aria-label="Review results">
+
+      <div class="pipeline" id="pipeline" aria-live="polite">
+        <div class="pipeline-empty muted">
+          <strong>Agents idle.</strong> Submit code and press <em>Run review</em> to watch the pipeline work:
+          intake → static pre-scan → five specialists in parallel → lead reviewer → walkthrough.
+        </div>
+      </div>
+
+      <div class="verdict-bar" id="verdict-bar" hidden>
+        <div class="score-ring" id="score-ring"><span id="score-value">–</span></div>
+        <div class="verdict-main">
+          <div class="verdict-label" id="verdict-label">–</div>
+          <div class="verdict-summary" id="verdict-summary"></div>
+        </div>
+        <div class="verdict-counts" id="verdict-counts"></div>
+        <div class="verdict-actions">
+          <button class="btn ghost small" id="copy-md-btn" title="Copy the whole review as markdown">Copy MD</button>
+          <button class="btn ghost small" id="download-btn" title="Download review.md">Download</button>
+        </div>
+      </div>
+
+      <div class="tabs" id="result-tabs" role="tablist" hidden>
+        <button class="tab active" data-tab="findings" role="tab">Findings <span class="badge" id="badge-findings">0</span></button>
+        <button class="tab" data-tab="walkthrough" role="tab">Walkthrough</button>
+        <button class="tab" data-tab="metrics" role="tab">Metrics</button>
+        <button class="tab" data-tab="trace" role="tab">Agent trace</button>
+        <button class="tab" data-tab="markdown" role="tab">Markdown</button>
+      </div>
+
+      <div class="pane-body results" id="results">
+        <div class="tab-panel" data-panel="findings">
+          <div class="filters" id="filters" hidden>
+            <input type="search" id="filter-search" placeholder="Filter findings… (text, file, rule)">
+            <div class="chips" id="severity-chips"></div>
+            <div class="chips" id="category-chips"></div>
+            <select id="file-filter"><option value="">All files</option></select>
+            <label class="checkbox"><input type="checkbox" id="sort-severity" checked> Sort by severity</label>
+          </div>
+          <div id="findings-list" class="findings-list">
+            <div class="empty-state">
+              <div class="empty-icon" aria-hidden="true">🔍</div>
+              <h3>No review yet</h3>
+              <p>Paste code, a diff, or a GitHub PR reference on the left and press <strong>Run review</strong>.</p>
+              <p class="muted">Works with no API key: the offline static engine reviews your code locally. Add a free Groq or Gemini key in Settings for full semantic review.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="walkthrough" hidden>
+          <div id="walkthrough-body" class="markdown-body"></div>
+          <div id="diagram-body" class="diagram-body"></div>
+          <div id="checklist-body"></div>
+        </div>
+
+        <div class="tab-panel" data-panel="metrics" hidden>
+          <div id="metrics-body"></div>
+        </div>
+
+        <div class="tab-panel" data-panel="trace" hidden>
+          <div id="trace-body"></div>
+        </div>
+
+        <div class="tab-panel" data-panel="markdown" hidden>
+          <div class="markdown-toolbar">
+            <button class="btn ghost small" id="copy-md-btn-2">Copy</button>
+            <button class="btn ghost small" id="download-btn-2">Download review.md</button>
+            <span class="muted">Paste this into a PR, or post it with the GitHub API.</span>
+          </div>
+          <pre id="markdown-body" class="markdown-raw"></pre>
+        </div>
+
+        <!-- follow-up chat -->
+        <div class="ask-panel" id="ask-panel" hidden>
+          <div class="ask-head">
+            <strong>Ask a follow-up</strong>
+            <span class="muted">the reviewer keeps the code and its findings in context</span>
+          </div>
+          <div class="ask-log" id="ask-log"></div>
+          <form id="ask-form" class="ask-form">
+            <input id="ask-input" type="text" autocomplete="off"
+              placeholder="e.g. Is the retry logic safe under concurrency?">
+            <button class="btn primary small" type="submit">Ask</button>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Findings are AI-generated — verify before acting.</span>
+    <span class="spacer"></span>
+    <span id="footer-meta" class="muted"></span>
+  </footer>
+</div>
+
+<!-- ============================ MODALS ============================ -->
+<div class="modal-backdrop" id="settings-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-head">
+      <h2 id="settings-title">Providers &amp; API keys</h2>
+      <button class="modal-close" data-close="settings-modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="muted">
+        Keys are held in server memory and written to <code>config.local.json</code> (gitignored).
+        They are never sent anywhere except the provider you select. Nothing is required —
+        the <strong>offline static engine</strong> reviews code with no key at all.
+      </p>
+      <div id="provider-list" class="provider-list"></div>
+    </div>
+    <div class="modal-foot">
+      <span class="muted" id="settings-status"></span>
+      <span class="spacer"></span>
+      <button class="btn" data-close="settings-modal">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="prompt-modal" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="prompt-title">
+    <div class="modal-head">
+      <h2 id="prompt-title">Reviewer system prompt</h2>
+      <button class="modal-close" data-close="prompt-modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="muted">
+        Sent verbatim as the <code>system</code> message to every agent. Each specialist appends a
+        narrow focus block plus the JSON output contract.
+      </p>
+      <pre id="prompt-core" class="prompt-text"></pre>
+      <h3>Agent focus blocks</h3>
+      <div id="prompt-agents"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="copy-prompt-btn">Copy system prompt</button>
+      <span class="spacer"></span>
+      <button class="btn" data-close="prompt-modal">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+<script src="vendor/highlight.js"></script>
+<script src="vendor/markdown.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
